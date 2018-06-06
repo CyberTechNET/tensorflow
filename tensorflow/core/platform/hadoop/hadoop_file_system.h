@@ -18,11 +18,6 @@ limitations under the License.
 
 #include "tensorflow/core/platform/env.h"
 
-extern "C" {
-struct hdfs_internal;
-typedef hdfs_internal* hdfsFS;
-}
-
 namespace tensorflow {
 
 class LibHDFS;
@@ -67,7 +62,7 @@ class HadoopFileSystem : public FileSystem {
   string TranslateName(const string& name) const override;
 
  private:
-  Status Connect(StringPiece fname, hdfsFS* fs);
+  Status Connect(StringPiece fname);
   LibHDFS* hdfs_;
 };
 

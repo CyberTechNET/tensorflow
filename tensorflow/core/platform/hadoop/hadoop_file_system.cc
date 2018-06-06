@@ -76,6 +76,50 @@ class LibHDFS {
   std::function<hdfsFileInfo*(hdfsFS, const char*)> hdfsGetPathInfo;
   std::function<int(hdfsFS, const char*, const char*)> hdfsRename;
 
+  // We rely on HDFS connection caching here. The HDFS client calls
+  // org.apache.hadoop.fs.FileSystem.get(), which caches the connection
+  // internally.
+  Status Connect(StringPiece fname, hdfsFS* fs) {
+    TF_RETURN_IF_ERROR(status());
+
+    StringPiece scheme, namenode, path;
+    io::ParseURI(fname, &scheme, &namenode, &path);
+    const string nn = namenode.ToString();
+
+    hdfsBuilder* builder = hdfsNewBuilder();
+    if (scheme == "file") {
+      hdfsBuilderSetNameNode(builder, nullptr);
+    } else if (scheme == "viewfs") {
+      char* defaultFS = nullptr;
+      hdfsConfGetStr("fs.defaultFS", &defaultFS);
+      StringPiece defaultScheme, defaultCluster, defaultPath;
+      io::ParseURI(defaultFS, &defaultScheme, &defaultCluster, &defaultPath);
+
+      if (scheme != defaultScheme || namenode != defaultCluster) {
+        return errors::Unimplemented(
+            "viewfs is only supported as a fs.defaultFS.");
+      }
+      // The default NameNode configuration will be used (from the XML
+      // configuration files). See:
+      // https://github.com/tensorflow/tensorflow/blob/v1.0.0/third_party/hadoop/hdfs.h#L259
+      hdfsBuilderSetNameNode(builder, "default");
+    } else {
+      hdfsBuilderSetNameNode(builder, nn.c_str());
+    }
+    // KERB_TICKET_CACHE_PATH will be deleted in the future, Because KRB5CCNAME is
+    // the build in environment variable of Kerberos, so KERB_TICKET_CACHE_PATH
+    // and related code are unnecessary.
+    char* ticket_cache_path = getenv("KERB_TICKET_CACHE_PATH");
+    if (ticket_cache_path != nullptr) {
+      hdfsBuilderSetKerbTicketCachePath(builder, ticket_cache_path);
+    }
+    *fs = hdfsBuilderConnect(builder);
+    if (*fs == nullptr) {
+      return errors::NotFound(strerror(errno));
+    }
+    return Status::OK();
+  }
+
  private:
   void LoadAndBind() {
     auto TryLoadAndBind = [this](const char* name, void** handle) -> Status {
@@ -135,50 +179,6 @@ class LibHDFS {
 HadoopFileSystem::HadoopFileSystem() : hdfs_(LibHDFS::Load()) {}
 
 HadoopFileSystem::~HadoopFileSystem() {}
-
-// We rely on HDFS connection caching here. The HDFS client calls
-// org.apache.hadoop.fs.FileSystem.get(), which caches the connection
-// internally.
-Status HadoopFileSystem::Connect(StringPiece fname, hdfsFS* fs) {
-  TF_RETURN_IF_ERROR(hdfs_->status());
-
-  StringPiece scheme, namenode, path;
-  io::ParseURI(fname, &scheme, &namenode, &path);
-  const string nn = namenode.ToString();
-
-  hdfsBuilder* builder = hdfs_->hdfsNewBuilder();
-  if (scheme == "file") {
-    hdfs_->hdfsBuilderSetNameNode(builder, nullptr);
-  } else if (scheme == "viewfs") {
-    char* defaultFS = nullptr;
-    hdfs_->hdfsConfGetStr("fs.defaultFS", &defaultFS);
-    StringPiece defaultScheme, defaultCluster, defaultPath;
-    io::ParseURI(defaultFS, &defaultScheme, &defaultCluster, &defaultPath);
-
-    if (scheme != defaultScheme || namenode != defaultCluster) {
-      return errors::Unimplemented(
-          "viewfs is only supported as a fs.defaultFS.");
-    }
-    // The default NameNode configuration will be used (from the XML
-    // configuration files). See:
-    // https://github.com/tensorflow/tensorflow/blob/v1.0.0/third_party/hadoop/hdfs.h#L259
-    hdfs_->hdfsBuilderSetNameNode(builder, "default");
-  } else {
-    hdfs_->hdfsBuilderSetNameNode(builder, nn.c_str());
-  }
-  // KERB_TICKET_CACHE_PATH will be deleted in the future, Because KRB5CCNAME is
-  // the build in environment variable of Kerberos, so KERB_TICKET_CACHE_PATH
-  // and related code are unnecessary.
-  char* ticket_cache_path = getenv("KERB_TICKET_CACHE_PATH");
-  if (ticket_cache_path != nullptr) {
-    hdfs_->hdfsBuilderSetKerbTicketCachePath(builder, ticket_cache_path);
-  }
-  *fs = hdfs_->hdfsBuilderConnect(builder);
-  if (*fs == nullptr) {
-    return errors::NotFound(strerror(errno));
-  }
-  return Status::OK();
-}
 
 string HadoopFileSystem::TranslateName(const string& name) const {
   StringPiece scheme, namenode, path;
@@ -259,7 +259,7 @@ class HDFSRandomAccessFile : public RandomAccessFile {
 Status HadoopFileSystem::NewRandomAccessFile(
     const string& fname, std::unique_ptr<RandomAccessFile>* result) {
   hdfsFS fs = nullptr;
-  TF_RETURN_IF_ERROR(Connect(fname, &fs));
+  TF_RETURN_IF_ERROR(hdfs_->Connect(fname, &fs));
 
   hdfsFile file =
       hdfs_->hdfsOpenFile(fs, TranslateName(fname).c_str(), O_RDONLY, 0, 0, 0);
@@ -325,7 +325,7 @@ class HDFSWritableFile : public WritableFile {
 Status HadoopFileSystem::NewWritableFile(
     const string& fname, std::unique_ptr<WritableFile>* result) {
   hdfsFS fs = nullptr;
-  TF_RETURN_IF_ERROR(Connect(fname, &fs));
+  TF_RETURN_IF_ERROR(hdfs_->Connect(fname, &fs));
 
   hdfsFile file =
       hdfs_->hdfsOpenFile(fs, TranslateName(fname).c_str(), O_WRONLY, 0, 0, 0);
@@ -339,7 +339,7 @@ Status HadoopFileSystem::NewWritableFile(
 Status HadoopFileSystem::NewAppendableFile(
     const string& fname, std::unique_ptr<WritableFile>* result) {
   hdfsFS fs = nullptr;
-  TF_RETURN_IF_ERROR(Connect(fname, &fs));
+  TF_RETURN_IF_ERROR(hdfs_->Connect(fname, &fs));
 
   hdfsFile file = hdfs_->hdfsOpenFile(fs, TranslateName(fname).c_str(),
                                       O_WRONLY | O_APPEND, 0, 0, 0);
@@ -363,7 +363,7 @@ Status HadoopFileSystem::NewReadOnlyMemoryRegionFromFile(
 
 Status HadoopFileSystem::FileExists(const string& fname) {
   hdfsFS fs = nullptr;
-  TF_RETURN_IF_ERROR(Connect(fname, &fs));
+  TF_RETURN_IF_ERROR(hdfs_->Connect(fname, &fs));
   if (hdfs_->hdfsExists(fs, TranslateName(fname).c_str()) == 0) {
     return Status::OK();
   }
@@ -374,7 +374,7 @@ Status HadoopFileSystem::GetChildren(const string& dir,
                                      std::vector<string>* result) {
   result->clear();
   hdfsFS fs = nullptr;
-  TF_RETURN_IF_ERROR(Connect(dir, &fs));
+  TF_RETURN_IF_ERROR(hdfs_->Connect(dir, &fs));
 
   // hdfsListDirectory returns nullptr if the directory is empty. Do a separate
   // check to verify the directory exists first.
@@ -405,7 +405,7 @@ Status HadoopFileSystem::GetMatchingPaths(const string& pattern,
 
 Status HadoopFileSystem::DeleteFile(const string& fname) {
   hdfsFS fs = nullptr;
-  TF_RETURN_IF_ERROR(Connect(fname, &fs));
+  TF_RETURN_IF_ERROR(hdfs_->Connect(fname, &fs));
 
   if (hdfs_->hdfsDelete(fs, TranslateName(fname).c_str(),
                         /*recursive=*/0) != 0) {
@@ -416,7 +416,7 @@ Status HadoopFileSystem::DeleteFile(const string& fname) {
 
 Status HadoopFileSystem::CreateDir(const string& dir) {
   hdfsFS fs = nullptr;
-  TF_RETURN_IF_ERROR(Connect(dir, &fs));
+  TF_RETURN_IF_ERROR(hdfs_->Connect(dir, &fs));
 
   if (hdfs_->hdfsCreateDirectory(fs, TranslateName(dir).c_str()) != 0) {
     return IOError(dir, errno);
@@ -426,7 +426,7 @@ Status HadoopFileSystem::CreateDir(const string& dir) {
 
 Status HadoopFileSystem::DeleteDir(const string& dir) {
   hdfsFS fs = nullptr;
-  TF_RETURN_IF_ERROR(Connect(dir, &fs));
+  TF_RETURN_IF_ERROR(hdfs_->Connect(dir, &fs));
 
   // Count the number of entries in the directory, and only delete if it's
   // non-empty. This is consistent with the interface, but note that there's
@@ -458,7 +458,7 @@ Status HadoopFileSystem::DeleteDir(const string& dir) {
 
 Status HadoopFileSystem::GetFileSize(const string& fname, uint64* size) {
   hdfsFS fs = nullptr;
-  TF_RETURN_IF_ERROR(Connect(fname, &fs));
+  TF_RETURN_IF_ERROR(hdfs_->Connect(fname, &fs));
 
   hdfsFileInfo* info = hdfs_->hdfsGetPathInfo(fs, TranslateName(fname).c_str());
   if (info == nullptr) {
@@ -471,7 +471,7 @@ Status HadoopFileSystem::GetFileSize(const string& fname, uint64* size) {
 
 Status HadoopFileSystem::RenameFile(const string& src, const string& target) {
   hdfsFS fs = nullptr;
-  TF_RETURN_IF_ERROR(Connect(src, &fs));
+  TF_RETURN_IF_ERROR(hdfs_->Connect(src, &fs));
 
   if (hdfs_->hdfsExists(fs, TranslateName(target).c_str()) == 0 &&
       hdfs_->hdfsDelete(fs, TranslateName(target).c_str(),
@@ -488,7 +488,7 @@ Status HadoopFileSystem::RenameFile(const string& src, const string& target) {
 
 Status HadoopFileSystem::Stat(const string& fname, FileStatistics* stats) {
   hdfsFS fs = nullptr;
-  TF_RETURN_IF_ERROR(Connect(fname, &fs));
+  TF_RETURN_IF_ERROR(hdfs_->Connect(fname, &fs));
 
   hdfsFileInfo* info = hdfs_->hdfsGetPathInfo(fs, TranslateName(fname).c_str());
   if (info == nullptr) {
