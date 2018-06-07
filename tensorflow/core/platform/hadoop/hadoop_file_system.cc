@@ -149,15 +149,10 @@ class LibHDFS {
       return Status::OK();
     };
 
-// libhdfs.so won't be in the standard locations. Use the path as specified
-// in the libhdfs documentation.
-#if defined(PLATFORM_WINDOWS)
-    const char* kLibHdfsDso = "hdfs.dll";
-#elif defined(MACOS) || defined(TARGET_OS_MAC)
-    const char* kLibHdfsDso = "libhdfs.dylib";
-#else
-    const char* kLibHdfsDso = "libhdfs.so";
-#endif
+    // libhdfs.so won't be in the standard locations. Use the path as specified
+    // in the libhdfs documentation.
+    const char* kLibHdfsDso =
+      Env::Default()->FormatLibraryFileName("hdfs", "").c_str();
     char* hdfs_home = getenv("HADOOP_HDFS_HOME");
     if (hdfs_home != nullptr) {
       string path = io::JoinPath(hdfs_home, "lib", "native", kLibHdfsDso);
@@ -168,7 +163,7 @@ class LibHDFS {
     }
 
     // Try to load the library dynamically in case it has been installed
-    // to a in non-standard location.
+    // to a non-standard location.
     status_ = TryLoadAndBind(kLibHdfsDso, &handle_);
   }
 
