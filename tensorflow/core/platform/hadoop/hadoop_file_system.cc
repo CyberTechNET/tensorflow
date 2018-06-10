@@ -62,6 +62,7 @@ class LibHDFS {
   std::function<void(hdfsBuilder*, const char* kerbTicketCachePath)>
       hdfsBuilderSetKerbTicketCachePath;
   std::function<int(hdfsFS, hdfsFile)> hdfsCloseFile;
+  std::function<tSize(hdfsFS, hdfsFile, void*, tSize)> hdfsRead;
   std::function<tSize(hdfsFS, hdfsFile, tOffset, void*, tSize)> hdfsPread;
   std::function<tSize(hdfsFS, hdfsFile, const void*, tSize)> hdfsWrite;
   std::function<int(hdfsFS, hdfsFile)> hdfsHFlush;
@@ -69,6 +70,8 @@ class LibHDFS {
   std::function<hdfsFile(hdfsFS, const char*, int, int, short, tSize)>
       hdfsOpenFile;
   std::function<int(hdfsFS, const char*)> hdfsExists;
+  std::function<tOffset(hdfsFS, hdfsFile)> hdfsTell;
+  std::function<int(hdfsFS, hdfsFile, tOffset)> hdfsSeek;
   std::function<hdfsFileInfo*(hdfsFS, const char*, int*)> hdfsListDirectory;
   std::function<void(hdfsFileInfo*, int)> hdfsFreeFileInfo;
   std::function<int(hdfsFS, const char*, int recursive)> hdfsDelete;
@@ -133,12 +136,13 @@ class LibHDFS {
       BIND_HDFS_FUNC(hdfsConfGetStr);
       BIND_HDFS_FUNC(hdfsBuilderSetKerbTicketCachePath);
       BIND_HDFS_FUNC(hdfsCloseFile);
-      BIND_HDFS_FUNC(hdfsPread);
+      BIND_HDFS_FUNC(hdfsRead);
       BIND_HDFS_FUNC(hdfsWrite);
       BIND_HDFS_FUNC(hdfsHFlush);
-      BIND_HDFS_FUNC(hdfsHSync);
       BIND_HDFS_FUNC(hdfsOpenFile);
       BIND_HDFS_FUNC(hdfsExists);
+      BIND_HDFS_FUNC(hdfsTell);
+      BIND_HDFS_FUNC(hdfsSeek);
       BIND_HDFS_FUNC(hdfsListDirectory);
       BIND_HDFS_FUNC(hdfsFreeFileInfo);
       BIND_HDFS_FUNC(hdfsDelete);
@@ -146,11 +150,31 @@ class LibHDFS {
       BIND_HDFS_FUNC(hdfsGetPathInfo);
       BIND_HDFS_FUNC(hdfsRename);
 #undef BIND_HDFS_FUNC
+
+      // libhdfs3 omits the "H" from "hdfsHSync".
+      if (!BindFunc(*handle, "hdfsHSync", &hdfsHSync).ok()) {
+        TF_RETURN_IF_ERROR(BindFunc(*handle, "hdfsSync", &hdfsHSync));
+      };
+
+      // libhdfs3 does not implement hdfsPred. The following is a fall-back
+      // implementation based on org.apache.hadoop.fs.FSInputStream#read.
+      if (!BindFunc(*handle, "hdfsPread", &hdfsPread).ok()) {
+        hdfsPread = [this](hdfsFS fs, hdfsFile f, tOffset pos,
+                           void* buffer, tSize length) -> tSize {
+          tOffset oldPos = hdfsTell(fs, f);
+          if (oldPos < 0 || hdfsSeek(fs, f, pos) < 0) {
+            return -1;
+          }
+
+          tSize n = hdfsRead(fs, f, buffer, length);
+          return hdfsSeek(fs, f, oldPos) == 0 ? n : -1;
+        };
+      }
+
       return Status::OK();
     };
 
-    // libhdfs.so won't be in the standard locations. Use the path as specified
-    // in the libhdfs documentation.
+    // Lookup the library in the path specified by the libhdfs documentation.
     const char* kLibHdfsDso =
       Env::Default()->FormatLibraryFileName("hdfs", "").c_str();
     char* hdfs_home = getenv("HADOOP_HDFS_HOME");
