@@ -3539,7 +3539,7 @@ def _sequence_length_from_sparse_tensor(sp_tensor, num_elements=1):
 
 
 class _SequenceCategoricalColumn(
-    _CategoricalColumn,
+    _FeatureColumn,
     collections.namedtuple(
         '_SequenceCategoricalColumn', ['categorical_column'])):
   """Represents sequences of categorical data."""
